@@ -2,10 +2,13 @@
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>
+#include <WebServer.h>
 #include <WiFi.h>
 
+#include "web_page.h"
+
 namespace {
-constexpr char kVersion[] = "0.1.2";
+constexpr char kVersion[] = "0.2.0";
 constexpr char kHostname[] = "c3-led-ota";
 constexpr uint8_t kLedPin = 2;
 constexpr uint16_t kLedCount = 30;
@@ -13,6 +16,7 @@ constexpr unsigned long kRetryMs = 15000;
 constexpr unsigned long kFrameMs = 40;
 Adafruit_NeoPixel strip(kLedCount, kLedPin, NEO_GRB + NEO_KHZ800);
 Preferences settings;
+WebServer server(80);
 String ssid;
 String wifiPassword;
 String otaPassword;
@@ -24,6 +28,9 @@ bool wasConnected = false;
 bool otaInProgress = false;
 unsigned long lastFrame = 0;
 uint16_t rainbowOffset = 0;
+String ledMode = "rainbow";
+uint32_t ledColor = 0xff0000;
+uint8_t ledBrightness = 20;
 
 void setColor(uint8_t r, uint8_t g, uint8_t b) {
   strip.fill(strip.Color(r, g, b));
@@ -40,6 +47,80 @@ void animateRainbow() {
   }
   strip.show();
   rainbowOffset += 256;
+}
+
+void showLedState() {
+  strip.setBrightness(ledBrightness);
+  if (ledMode == "off") {
+    setColor(0, 0, 0);
+  } else if (ledMode == "solid") {
+    setColor((ledColor >> 16) & 0xff, (ledColor >> 8) & 0xff, ledColor & 0xff);
+  } else {
+    lastFrame = millis() - kFrameMs;
+    animateRainbow();
+  }
+}
+
+bool validHost() {
+  const String ip = WiFi.localIP().toString();
+  const String host = server.header("Host");
+  return host == ip || host == ip + ":80";
+}
+
+void sendState() {
+  char json[100];
+  snprintf(json, sizeof(json), "{\"mode\":\"%s\",\"color\":\"%06lx\",\"brightness\":%u}",
+           ledMode.c_str(), static_cast<unsigned long>(ledColor), static_cast<unsigned>(ledBrightness));
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
+}
+
+void setupWeb() {
+  const char* headers[] = {"Host", "Origin"};
+  server.collectHeaders(headers, 2);
+  server.on("/", HTTP_GET, []() {
+    if (!validHost()) {
+      server.send(403, "text/plain", "Invalid host");
+      return;
+    }
+    server.sendHeader("Cache-Control", "no-store");
+    server.send_P(200, "text/html; charset=utf-8", kWebPage);
+  });
+  server.on("/api/state", HTTP_GET, []() {
+    if (!validHost()) {
+      server.send(403, "text/plain", "Invalid host");
+      return;
+    }
+    sendState();
+  });
+  server.on("/api/state", HTTP_POST, []() {
+    if (!validHost() || server.header("Origin") != "http://" + WiFi.localIP().toString()) {
+      server.send(403, "text/plain", "Invalid origin");
+      return;
+    }
+    const String mode = server.arg("mode");
+    const String color = server.arg("color");
+    const String brightness = server.arg("brightness");
+    bool valid = server.args() == 3 && (mode == "rainbow" || mode == "solid" || mode == "off") &&
+                 color.length() == 6 && brightness.length() > 0 && brightness.length() <= 2;
+    for (unsigned i = 0; i < color.length(); ++i) {
+      const char c = color[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) valid = false;
+    }
+    for (unsigned i = 0; i < brightness.length(); ++i) {
+      if (brightness[i] < '0' || brightness[i] > '9') valid = false;
+    }
+    if (!valid || brightness.toInt() > 20) {
+      server.send(400, "text/plain", "Invalid LED settings");
+      return;
+    }
+    ledMode = mode;
+    ledColor = strtoul(color.c_str(), nullptr, 16);
+    ledBrightness = static_cast<uint8_t>(brightness.toInt());
+    showLedState();
+    sendState();
+  });
+  server.onNotFound([]() { server.send(validHost() ? 404 : 403, "text/plain", "Not found"); });
 }
 
 void startWifi() {
@@ -121,6 +202,7 @@ void setupOta() {
   ArduinoOTA.setPassword(otaPassword.c_str());
   ArduinoOTA.onStart([]() {
     otaInProgress = true;
+    strip.setBrightness(20);
     setColor(48, 24, 0);
     Serial.println("OTA_START");
   });
@@ -128,7 +210,7 @@ void setupOta() {
   ArduinoOTA.onError([](ota_error_t error) {
     otaInProgress = false;
     Serial.printf("OTA_ERROR: %u\n", static_cast<unsigned>(error));
-    setColor(32, 0, 0);
+    showLedState();
   });
   ArduinoOTA.begin();
   otaStarted = true;
@@ -137,6 +219,7 @@ void setupOta() {
 
 void setup() {
   Serial.begin(115200);
+  setupWeb();
   strip.begin();
   strip.setBrightness(20);
   setColor(32, 0, 0);
@@ -174,10 +257,14 @@ void loop() {
   const bool connected = WiFi.status() == WL_CONNECTED;
   if (connected && !wasConnected) {
     Serial.printf("WIFI_CONNECTED ip=%s version=%s\n", WiFi.localIP().toString().c_str(), kVersion);
-    setColor(0, 0, 40);
     if (!otaStarted) setupOta();
+    server.begin();
+    showLedState();
   } else if (!connected && wasConnected) {
     Serial.println("WIFI_DISCONNECTED");
+    server.stop();
+    otaInProgress = false;
+    strip.setBrightness(20);
     setColor(32, 0, 0);
     if (otaStarted) {
       ArduinoOTA.end();
@@ -187,7 +274,10 @@ void loop() {
   wasConnected = connected;
   if (connected && otaStarted) {
     ArduinoOTA.handle();
-    if (!otaInProgress) animateRainbow();
+    if (!otaInProgress) {
+      server.handleClient();
+      if (ledMode == "rainbow") animateRainbow();
+    }
   }
   if (!connected && configStep == 0 && !ssid.isEmpty() && otaPassword.length() >= 6 &&
       millis() - lastRetry >= kRetryMs) {

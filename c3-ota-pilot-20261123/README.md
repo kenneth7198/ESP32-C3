@@ -2,8 +2,8 @@
 
 This isolated PlatformIO project targets an ESP32-C3 with 30 WS2812B LEDs on
 GPIO2. The LEDs show dim red while disconnected, a low-brightness moving
-rainbow when connected, and amber during an OTA transfer.
-No ESP-NOW, MQTT, web dashboard, or remote LED control is implemented.
+rainbow when connected, and amber during an OTA transfer. A web page hosted
+on the device controls the strip's mode, color, and brightness.
 
 ## Hardware
 
@@ -28,6 +28,21 @@ low during reset. Do not hot-plug the strip while powered.
 4. Record the IP or reserve it in DHCP. Verify proart can reach that IP over
    the network before removing USB. The C3 and proart need routable network
    access in both directions; guest/client isolation can prevent OTA.
+
+## Web control
+
+After provisioning, connect a phone or computer to the same trusted network
+and open `http://DEVICE_IP/`, replacing `DEVICE_IP` with the IP reported by
+`python status.py COM14` or the router. Use the IP address rather than a
+hostname. Choose rainbow, solid color, or off, then press Apply. Brightness
+is limited to 20 out of 255. Changes are kept in memory: a restart restores
+the default rainbow and brightness. Wi-Fi disconnection and OTA use their
+status colors; the chosen setting resumes after reconnection or an OTA error.
+
+The page and HTTP API have **no login or encryption**: anyone who can reach
+the device can control the LEDs. Use only a trusted isolated network; do not
+expose the web server or OTA to the Internet. The browser interface requires
+JavaScript and a current browser.
 
 ## OTA
 
